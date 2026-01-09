@@ -1,0 +1,32 @@
+name: 'SSH pubkey action by ge9'
+description: |
+  Setup SSH authorized_keys using provided public key.
+  Supports Linux, macOS, and Windows.
+
+inputs:
+  ssh_public_key:
+    description: "SSH public key content to install"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup authorized_keys (Linux / macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -e
+        mkdir -p "$HOME/.ssh"
+        chmod 700 "$HOME/.ssh"
+        echo "${{ inputs.ssh_public_key }}" > "$HOME/.ssh/authorized_keys"
+        chmod 600 "$HOME/.ssh/authorized_keys"
+
+    - name: Setup authorized_keys (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $path = "$env:PROGRAMDATA\ssh\administrators_authorized_keys"
+        Set-Content -Path $path -Value "${{ inputs.ssh_public_key }}" -Encoding ascii
+        icacls $path /inheritance:r
+        icacls $path /grant "Administrators:F"
+        icacls $path /grant "SYSTEM:F"
