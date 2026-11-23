@@ -1,0 +1,76 @@
+name: tailscale-ssh
+inputs:
+  oauth-secret: {default: ''}
+  oauth-client-id: {default: ''}
+  prefix: {default: 'gha-ssh'}
+  tags: {required: true}
+  susshd-port: {default: ''}
+runs:
+  using: composite
+  steps:
+    - id: prep
+      shell: bash
+      env:
+        SECRET: ${{ inputs.oauth-secret }}
+        ID: ${{ inputs.oauth-client-id }}
+        SSH_PREFIX: ${{ inputs.prefix }}
+      run: |
+        if [ -n "$SECRET" ]; then ID=$(echo "$SECRET" | cut -d- -f3); echo "::add-mask::$ID"; fi
+        echo "id=$ID" >> "$GITHUB_OUTPUT"
+        echo "host=$SSH_PREFIX-$RUNNER_OS-$(openssl rand -hex 4)" >> "$GITHUB_OUTPUT"
+        echo ssh=$(curl -s https://github.com/$GITHUB_ACTOR.keys) >> "$GITHUB_OUTPUT"
+
+    - uses: tailscale/github-action@v4
+      with:
+        oauth-client-id: ${{ steps.prep.outputs.id }}
+        oauth-secret: ${{ inputs.oauth-secret }}
+        audience: ${{ inputs.oauth-secret == '' && format('api.tailscale.com/{0}', steps.prep.outputs.id) || '' }}
+        hostname: ${{ steps.prep.outputs.host }}
+        tags: ${{ inputs.tags }}
+    - name: Restore system DNS (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        networksetup -listallnetworkservices | tail -n +2 | sed 's/^\*//' | while read -r s; do
+          sudo networksetup -setdnsservers "$s" empty
+          sudo networksetup -setsearchdomains "$s" empty
+        done
+        sudo dscacheutil -flushcache
+        sudo killall -HUP mDNSResponder || true
+        nslookup github.com
+    - uses: ge9/actions/ssh-pubkey@main
+      with:
+        ssh_public_key: ${{ steps.prep.outputs.ssh }}
+
+    - if: inputs.susshd-port != ''
+      shell: bash
+      env:
+        PORT: ${{ inputs.susshd-port }}
+      run: |
+        cd "$RUNNER_TEMP"
+        os=$(echo $RUNNER_OS | tr A-Z a-z | sed s/macos/darwin/)
+        arch=$(echo $RUNNER_ARCH | tr A-Z a-z | sed s/x64/amd64/)
+        if [ $os = windows ]; then
+          x=.exe
+          mkdir -p ~/.ssh
+          cp "$ProgramData/ssh/administrators_authorized_keys" ~/.ssh/authorized_keys
+        fi
+        curl -fsSLo sshd$x https://github.com/ge9/single-user-sshd/releases/latest/download/single-user-sshd-$os-$arch$x
+        chmod +x sshd$x
+        ssh-keygen -q -t ed25519 -N '' -f hostkey
+        nohup ./sshd$x -b :$PORT -h hostkey > log 2>&1 &
+    - id: name
+      shell: bash
+      env:
+        PORT: ${{ inputs.susshd-port }}
+      run: |
+        info="ssh${PORT:+ -p $PORT} $(tailscale status | awk 'NR==1{print $2}')"
+        echo "info=$info" >> "$GITHUB_OUTPUT"
+        echo "::notice::$info"
+    - uses: ge9/actions/timeout@main
+      with:
+        check-cmd: ${{ inputs.susshd-port == ''
+                    && (runner.os == 'Windows' && 'tasklist /FI "IMAGENAME eq sshd.exe" /V | findstr /I runneradmin' || 'pgrep sshd -u runner')
+                    || (runner.os == 'Windows' && format('netstat -an | findstr ESTABLISHED | findstr :{0}', inputs.susshd-port)
+                                               || format('netstat -an | grep ESTABLISHED | grep -q "[.:]{0} "', inputs.susshd-port)) }}
+        info-cmd: echo ${{ steps.name.outputs.info }}
